@@ -1,55 +1,54 @@
 # AI Interview Coach
 
-A Streamlit interview practice app backed by a FastAPI service. It supports user accounts, adaptive interview sessions, answer feedback, reports, and history.
+A local-first interview practice app with a Streamlit interface, FastAPI backend, MongoDB storage, and Ollama-powered question generation and feedback. AI requests and interview answers stay on the computer running Ollama; the project does not require a paid API key.
 
-## Run it now: no `.env`, API key, MongoDB, or paid service
+## One-time setup on Windows
 
-In PowerShell, from this project directory:
+1. Install Python and [MongoDB Community Server](https://www.mongodb.com/docs/manual/administration/install-community/). Run MongoDB as a Windows service.
+2. Install [Ollama for Windows](https://ollama.com/download) and open it.
+3. In the VS Code terminal, download the local language model and optional embedding model:
 
-```powershell
-.\run-local.ps1
-```
+   ```powershell
+   ollama pull qwen3.5:4b
+   ollama pull embeddinggemma
+   ```
 
-The launcher creates `.venv` if needed, installs Python packages, starts the API and Streamlit, and opens the app at `http://localhost:8501`. This first-run path needs an internet connection to download Python packages, but it does not make paid AI API calls. Until a local AI model is installed and running, the app uses built-in questions and clearly labeled placeholder feedback. Without MongoDB, accounts and sessions are kept in memory and disappear when the API stops.
+   The embedding model only adds the semantic-similarity metric. Interview generation, evaluation, and reports use `qwen3.5:4b`.
 
-## Zero API-cost AI (optional local setup)
+4. Confirm the project `.env` uses your local MongoDB and Ollama settings. It is private and excluded from Git. `.env.example` is only a shareable settings template.
+5. Start the app from the project directory:
 
-The app defaults to Ollama at `http://127.0.0.1:11434`. Install [Ollama](https://ollama.com/download) and download a model once:
+   ```powershell
+   .\run-local.ps1
+   ```
 
-```powershell
-ollama run gemma4:e2b
-```
+The launcher creates the Python virtual environment if needed, starts the FastAPI backend, and then opens Streamlit. Visit `http://localhost:8501`. MongoDB must be running before the launcher starts.
 
-For the extra semantic-similarity score, download the embedding model too:
+## Check local services
 
-```powershell
-ollama pull embeddinggemma
-```
+Open `http://127.0.0.1:8000/api/health`. A healthy response reports `"database":"mongodb"` and `"ai":"ready"`. If Ollama is not running, open the Ollama app. If the configured model is missing, run the `ollama pull` command shown by the health response or dashboard.
 
-The chat model runs locally, so the app needs no LLM key and sends interview text to no remote AI provider. The model download requires disk space and internet; local inference uses your computer's resources and electricity. If Ollama is not running or the model is unavailable, the app falls back to demo questions/placeholder feedback rather than failing to launch. The API calls Ollama's local [generate](https://docs.ollama.com/api/generate) and [embed](https://docs.ollama.com/api/embed) endpoints.
+The dashboard also displays Ollama readiness. If the model is unavailable, creating an interview or requesting feedback returns a clear setup error; the app does not silently replace AI feedback with placeholder scores.
 
-## MongoDB choices
+## Local settings
 
-- **Run immediately:** the built-in memory store requires no database setup; data is temporary and clears when the API stops.
-- **Persistent local database:** install Docker Desktop, then run `docker compose up -d mongodb`. The backend detects the default local MongoDB address automatically. This stores data on your computer in a Docker volume and does not require a paid cloud database.
-- **Cloud option:** MongoDB Atlas has a free cluster tier with a 512 MB data-and-index storage limit. Atlas requires a database user and IP access-list entry; configure its URI in `.env`. [Atlas cluster tiers](https://www.mongodb.com/docs/atlas/manage-clusters/)
+- `MONGODB_URI=mongodb://127.0.0.1:27017`
+- `MONGODB_DATABASE=interview_coach`
+- `MONGODB_REQUIRED=true` to require persistent local MongoDB
+- `OLLAMA_BASE_URL=http://127.0.0.1:11434`
+- `OLLAMA_MODEL=qwen3.5:4b`
+- `OLLAMA_EMBEDDING_MODEL=embeddinggemma` (optional)
+- `OLLAMA_NUM_CTX=8192` to keep the local model's context and memory use bounded
+- `OLLAMA_KEEP_ALIVE=5m` to keep the model loaded during a practice session
 
-## Optional remote AI providers
+If MongoDB is stopped or unreachable while `MONGODB_REQUIRED=true`, the API will not start. To try the app without persistent storage, set `MONGODB_REQUIRED=false`; accounts and sessions will then be lost when the backend stops.
 
-The default app mode does not use remote AI services. You may optionally configure Gemini or OpenAI, but this requires an API key. Google's Gemini API offers a free tier for selected models subject to changing quotas; check current [pricing and limits](https://ai.google.dev/gemini-api/docs/pricing). Do not treat a free tier as a permanent guarantee, and avoid sending sensitive personal information to external providers. OpenAI API usage may incur charges. Provider keys are never needed for the local Ollama path.
+## Voice answers
 
-To use optional overrides, copy `.env.example` to `.env` and edit only the settings you need. `.env.example` is a shareable template; `.env` is your private local configuration and is excluded from Git. Neither file is required to start the demo.
+Local voice transcription is optional. Install `requirements-voice.txt` and FFmpeg, then use the audio upload in an interview. Text-to-speech is not implemented.
 
-## Voice
+## Hosting from this PC
 
-Local Whisper speech-to-text is optional. Install `requirements-voice.txt` and FFmpeg, then the first transcription downloads a Whisper model. This is local processing, with no speech API key. Text-to-speech is not implemented yet.
+Ollama runs on the machine that serves inference. To share a demo, this PC must remain powered on, connected to the internet, and running Ollama, FastAPI, and Streamlit. A tunnel can provide temporary access for a demo; it does not make the app independent of this PC or give it unlimited compute capacity. Keep Ollama's port private and expose only the authenticated app/API.
 
-## Implemented
-
-- Streamlit sign-up/sign-in, interview configuration, five-question sessions, feedback, report, and history screens.
-- FastAPI auth/session endpoints. Passwords are hashed with Argon2; JWTs protect user data.
-- MongoDB persistence when available, with in-memory fallback for a zero-setup demo.
-- Local Ollama question generation, evaluation, adaptive follow-ups, reports, and optional embeddings; optional Gemini/OpenAI providers.
-- Optional local Whisper transcription.
-
-API documentation is available at `http://127.0.0.1:8000/docs` while running.
+FastAPI documentation is available at `http://127.0.0.1:8000/docs` while the app is running.

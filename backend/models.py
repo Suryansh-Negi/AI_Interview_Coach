@@ -9,10 +9,10 @@ class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=100)
     password: str = Field(min_length=8, max_length=128)
 
-    @field_validator("full_name")
+    @field_validator("full_name", mode="before")
     @classmethod
     def trim_name(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value
 
 
 class LoginRequest(BaseModel):
@@ -68,3 +68,7 @@ class HealthResponse(BaseModel):
     status: str
     database: str
     ai: str
+    ai_model: str | None = None
+    ai_detail: str | None = None
+    embedding: str | None = None
+    embedding_model: str | None = None

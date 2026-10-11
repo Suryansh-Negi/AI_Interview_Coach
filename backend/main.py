@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     app.state.db = None
     app.state.database_mode = "memory_fallback"
     mongo_uri = os.getenv("MONGODB_URI", "mongodb://127.0.0.1:27017")
+    mongo_required = os.getenv("MONGODB_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"}
     if mongo_uri:
         client = AsyncMongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
         try:
@@ -62,17 +63,23 @@ async def lifespan(app: FastAPI):
             app.state.db = db
             app.state.database_mode = "mongodb"
             logger.info("Connected to MongoDB database %s", database_name)
-        except PyMongoError:
+        except PyMongoError as exc:
             await client.close()
+            if mongo_required:
+                logger.error("MongoDB is required but the configured server could not be reached (%s).", type(exc).__name__)
+                raise RuntimeError("MongoDB is required but unavailable. Start MongoDB Community Server and check MONGODB_URI in .env.") from None
             logger.warning("MongoDB is unavailable; using temporary in-memory storage for this run")
     else:
+        if mongo_required:
+            raise RuntimeError("MongoDB is required but MONGODB_URI is blank. Set it in .env.")
         logger.info("MONGODB_URI is blank; using temporary in-memory storage for this run")
     if app.state.db is None:
+        if mongo_required:
+            raise RuntimeError("MongoDB is required but no persistent database connection is available.")
         app.state.db = MemoryDatabase()
     if not os.getenv("JWT_SECRET_KEY"):
         logger.warning("JWT_SECRET_KEY is unset; tokens will be invalidated whenever the API restarts")
     yield
-    await ai.close_client()
     if app.state.mongo_client is not None:
         await app.state.mongo_client.close()
 
@@ -162,10 +169,11 @@ Database = Annotated[object, Depends(get_db)]
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
-    database = app.state.database_mode
-    provider = ai.ai_provider()
-    ai_status = "local_ollama_or_fallback" if provider == "ollama" else ("configured" if ai.ai_is_configured() else "fallback_mode")
-    return {"status": "ok", "database": database, "ai": ai_status}
+    return {
+        "status": "ok",
+        "database": app.state.database_mode,
+        **(await ai.health_status()),
+    }
 
 
 @app.post("/api/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
@@ -174,7 +182,7 @@ async def register(payload: RegisterRequest, db: Database):
     document = {
         "email": email,
         "full_name": payload.full_name.strip(),
-        "password_hash": password_hash.hash(payload.password),
+        "password_hash": await run_in_threadpool(password_hash.hash, payload.password),
         "created_at": datetime.now(timezone.utc),
     }
     try:
@@ -188,7 +196,10 @@ async def register(payload: RegisterRequest, db: Database):
 @app.post("/api/auth/login", response_model=AuthResponse)
 async def login(payload: LoginRequest, db: Database):
     user = await db.users.find_one({"email": str(payload.email).lower()})
-    if user is None or not password_hash.verify(payload.password, user["password_hash"]):
+    password_matches = False
+    if user is not None:
+        password_matches = await run_in_threadpool(password_hash.verify, payload.password, user["password_hash"])
+    if not password_matches:
         raise HTTPException(status_code=401, detail="Email or password is incorrect.", headers={"WWW-Authenticate": "Bearer"})
     return {"access_token": create_token(str(user["_id"]), user["email"]), "user": public_user(user)}
 
@@ -241,7 +252,13 @@ async def transcribe_audio(user: CurrentUser, file: UploadFile = File(...)):
 
 @app.post("/api/sessions", response_model=InterviewSessionPublic, status_code=status.HTTP_201_CREATED)
 async def create_session(payload: SessionCreate, user: CurrentUser, db: Database):
-    questions = await ai.generate_questions(payload.role.strip(), payload.interview_type, payload.difficulty)
+    try:
+        questions = await ai.generate_questions(payload.role.strip(), payload.interview_type, payload.difficulty)
+    except ai.AIServiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except Exception:
+        logger.exception("Local question generation failed")
+        raise HTTPException(status_code=502, detail="Ollama could not generate questions. Check the local AI status and retry.") from None
     now = datetime.now(timezone.utc)
     document = {
         "user_id": user["_id"],
@@ -291,9 +308,11 @@ async def submit_answer(session_id: str, payload: AnswerRequest, user: CurrentUs
     question = document["questions"][payload.question_index]
     try:
         evaluation = await ai.evaluate_answer(document["role"], document["difficulty"], question["prompt"], payload.answer.strip())
+    except ai.AIServiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except Exception as exc:
         logger.exception("Answer evaluation failed")
-        raise HTTPException(status_code=502, detail="Answer evaluation is temporarily unavailable.") from exc
+        raise HTTPException(status_code=502, detail="Ollama could not evaluate this answer. Check the local AI status and retry.") from exc
     answers = document["answers"].copy()
     answers[payload.question_index] = {"answer": payload.answer.strip(), "evaluation": evaluation}
     questions = document["questions"].copy()
@@ -317,7 +336,13 @@ async def complete_session(session_id: str, user: CurrentUser, db: Database):
         raise HTTPException(status_code=404, detail="Interview session not found.")
     if document["status"] == "completed":
         return session_document(document)
-    report = await ai.create_report(document["role"], document["answers"])
+    try:
+        report = await ai.create_report(document["role"], document["answers"])
+    except ai.AIServiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except Exception as exc:
+        logger.exception("Local report generation failed")
+        raise HTTPException(status_code=502, detail="Ollama could not prepare the report. Check the local AI status and retry.") from exc
     await db.sessions.update_one(query, {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc), "report": report}})
     document["status"] = "completed"
     document["completed_at"] = datetime.now(timezone.utc)
